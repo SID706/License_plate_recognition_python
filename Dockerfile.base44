@@ -1,0 +1,33 @@
+# Development image for the License Plate Recognition demo.
+# Only dependencies live in the image; the source is bind-mounted by docker-compose.base44.yml
+# so edits are picked up without rebuilding.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    YOLO_CONFIG_DIR=/tmp/ultralytics
+
+# libgl1 / libglib2.0-0: needed by the opencv wheels, libgomp1: torch runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU-only torch keeps the image ~5x smaller than the default CUDA wheels
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements-web.txt /tmp/requirements-web.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-web.txt
+
+# The trained weights are not in the repo (see README); fetch them once into the image.
+ARG MODEL_URL="https://drive.usercontent.google.com/download?id=1IW4Hiw8C7L__o01-WTS6RMqHWpXvQeSg&export=download&confirm=t"
+RUN mkdir -p /opt/lpr/models \
+    && curl -fsSL --retry 3 --retry-delay 2 "$MODEL_URL" -o /opt/lpr/models/best.pt \
+    && test "$(stat -c %s /opt/lpr/models/best.pt)" -gt 10000000 \
+    || (echo "Could not download best.pt - see README for the model link" >&2; exit 1)
+
+# Pre-download the EasyOCR english models so the first request is not a long cold start
+RUN python -c "import easyocr; easyocr.Reader(['en'], gpu=False)"
+
+WORKDIR /app
+EXPOSE 3000
+CMD ["python", "-m", "flask", "--app", "webapp", "run", "--host", "0.0.0.0", "--port", "3000", "--debug"]
