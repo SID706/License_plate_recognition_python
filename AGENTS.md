@@ -29,6 +29,17 @@ docker compose -f docker-compose.base44.yml up -d --build
   reaches the no-camera branch (`NotFoundError` → "No camera was found"). Camera access needs a
   secure context (https) and an unblocked permission prompt.
 
+## Saved scan records
+
+- Readings are stored in SQLite at `DB_PATH` (`/data/records.db` in compose), on the named
+  volume `lpr-data` — deliberately outside the repo bind mount so records are never committed.
+  Table `scans`: id, plate, detection_confidence, ocr_confidence, source (`live`/`upload`), scanned_at (UTC ISO).
+- API: `GET /api/records`, `POST /api/records`, `DELETE /api/records/<id>`, `DELETE /api/records`.
+- Live scan saves each distinct plate once per camera session (client-side dedupe in
+  `saveNewPlates`); an uploaded result can be saved with "Save this reading".
+- Records survive `docker compose restart`/`down`; `docker compose down -v` or the page's
+  "Clear all" removes them.
+
 ## Verifying
 
 ```bash

@@ -3,13 +3,17 @@
 predict.py runs the YOLO detector + EasyOCR pipeline from the command line for files
 and videos; number_plate.py needs a local webcam. This module exposes the same
 pipeline (detect plates with best.pt, read the characters with EasyOCR) as a small
-web page so the project can be exercised from a browser.
+web page so the project can be exercised from a browser, and stores the readings it
+collects so they can be reviewed and managed.
 """
 
 import base64
 import os
+import sqlite3
 import threading
 import time
+from contextlib import closing
+from datetime import datetime, timezone
 
 import cv2
 import easyocr
@@ -18,6 +22,7 @@ from flask import Flask, jsonify, render_template, request
 from ultralytics import YOLO
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "best.pt")
+DB_PATH = os.environ.get("DB_PATH", "data/records.db")
 CONFIDENCE = float(os.environ.get("LPR_CONFIDENCE", "0.25"))
 MAX_UPLOAD_MB = 20
 
@@ -27,6 +32,35 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 _lock = threading.Lock()
 _model = None
 _reader = None
+
+
+def db():
+    directory = os.path.dirname(DB_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return closing(connection)
+
+
+def init_db():
+    with db() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plate TEXT NOT NULL,
+                detection_confidence REAL NOT NULL DEFAULT 0,
+                ocr_confidence REAL NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'live',
+                scanned_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+
+init_db()
 
 
 def get_model():
@@ -145,6 +179,57 @@ def api_detect():
         elapsed_ms=round((time.time() - started) * 1000),
         size=[img.shape[1], img.shape[0]],
     )
+
+
+@app.get("/api/records")
+def list_records():
+    with db() as connection:
+        rows = connection.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 200").fetchall()
+    return jsonify(records=[dict(row) for row in rows])
+
+
+@app.post("/api/records")
+def create_record():
+    payload = request.get_json(silent=True) or {}
+    plate = str(payload.get("plate") or "").strip()
+    if not plate:
+        return jsonify(error="There is no plate reading to save."), 400
+
+    source = "live" if payload.get("source") == "live" else "upload"
+    scanned_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with db() as connection:
+        cursor = connection.execute(
+            "INSERT INTO scans (plate, detection_confidence, ocr_confidence, source, scanned_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                plate[:32],
+                float(payload.get("detection_confidence") or 0),
+                float(payload.get("ocr_confidence") or 0),
+                source,
+                scanned_at,
+            ),
+        )
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM scans WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+    return jsonify(record=dict(row)), 201
+
+
+@app.delete("/api/records/<int:record_id>")
+def delete_record(record_id):
+    with db() as connection:
+        connection.execute("DELETE FROM scans WHERE id = ?", (record_id,))
+        connection.commit()
+    return jsonify(deleted=record_id)
+
+
+@app.delete("/api/records")
+def clear_records():
+    with db() as connection:
+        removed = connection.execute("DELETE FROM scans").rowcount
+        connection.commit()
+    return jsonify(deleted=removed)
 
 
 if __name__ == "__main__":

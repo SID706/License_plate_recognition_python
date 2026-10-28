@@ -93,6 +93,32 @@
       border-top-color: var(--accent-ink); border-radius: 50%; animation: r .7s linear infinite;
       vertical-align: -2px; margin-right: 7px; }
     @keyframes r { to { transform: rotate(360deg); } }
+
+    .records { margin-top: 20px; }
+    .records-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+    }
+    .records-head h2 { margin: 0; }
+    .count {
+      display: inline-block; min-width: 24px; text-align: center; margin-left: 4px;
+      padding: 2px 8px; border-radius: 999px; background: #0d211b; color: var(--accent);
+      border: 1px solid #1f4a3d; font-size: 0.74rem; letter-spacing: 0.04em;
+    }
+    .records-list { max-height: 360px; overflow-y: auto; }
+    .record {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+      background: #0e171d; margin-bottom: 8px;
+    }
+    .record code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1rem; letter-spacing: 0.05em; color: var(--accent); flex: 1 1 140px;
+    }
+    .record .meta { text-align: left; }
+    .record .when { color: var(--muted); font-size: 0.76rem; }
+    .record button { padding: 6px 12px; font-size: 0.82rem; }
+    .record button:hover:not(:disabled) { border-color: #7a2f28; color: #ff9b8a; }
   </style>
 </head>
 <body>
@@ -101,7 +127,8 @@
       <span class="badge">YOLOv8 + EasyOCR</span>
       <h1>Number Plate Reader</h1>
       <p>The trained detector finds the plate in a photo, then OCR reads the characters off it.
-        Upload a picture of a vehicle, start with the sample photo, or scan live with this device's camera.</p>
+        Upload a picture of a vehicle, start with the sample photo, or scan live with this device's camera.
+        Every reading you keep is stored below.</p>
     </header>
 
     <div class="grid">
@@ -120,7 +147,7 @@
           </div>
         </form>
         <div class="hint">Live scan reads frames from this device's camera in the browser and sends
-          them to the same detector. Detection confidence threshold is 0.25.</div>
+          them to the same detector. Each new plate it reads is saved once.</div>
         <div class="error" id="error" hidden></div>
       </section>
 
@@ -140,9 +167,23 @@
           <img class="result" id="result-image" alt="Annotated result" />
           <div id="plates" style="margin-top:14px"></div>
           <div class="foot" id="timing"></div>
+          <div class="row">
+            <button id="save-result" type="button" disabled>Save this reading</button>
+          </div>
         </div>
       </section>
     </div>
+
+    <section class="card records">
+      <div class="records-head">
+        <h2>3 · Saved scans <span class="count" id="record-count">0</span></h2>
+        <div class="row" style="margin:0">
+          <button id="export" type="button">Export CSV</button>
+          <button id="clear" type="button">Clear all</button>
+        </div>
+      </div>
+      <div id="records" class="records-list"></div>
+    </section>
   </div>
 
   <script>
@@ -159,15 +200,24 @@
     const resultImage = document.getElementById('result-image');
     const plates = document.getElementById('plates');
     const timing = document.getElementById('timing');
+    const saveResultBtn = document.getElementById('save-result');
     const liveBox = document.getElementById('live-box');
     const liveVideo = document.getElementById('live-video');
     const liveOverlay = document.getElementById('live-overlay');
     const livePlates = document.getElementById('live-plates');
     const liveStatus = document.getElementById('live-status');
+    const recordsList = document.getElementById('records');
+    const recordCount = document.getElementById('record-count');
+    const exportBtn = document.getElementById('export');
+    const clearBtn = document.getElementById('clear');
 
     let stream = null;
     let scanning = false;
     let timer = null;
+    let savedPlates = new Set();
+    let savedCount = 0;
+    let lastResult = null;
+    let records = [];
 
     function setError(message) {
       errorBox.textContent = message || '';
@@ -201,6 +251,161 @@
         container.appendChild(row);
       });
     }
+
+    // ---- saved scan records -----------------------------------------------
+
+    async function loadRecords() {
+      try {
+        const response = await fetch('/api/records');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not load saved scans.');
+        records = data.records;
+        renderRecords();
+      } catch (err) {
+        recordsList.innerHTML = '';
+        recordCount.textContent = '0';
+        const box = document.createElement('div');
+        box.className = 'empty';
+        box.style.minHeight = '70px';
+        box.textContent = err.message;
+        recordsList.appendChild(box);
+      }
+    }
+
+    function whenText(iso) {
+      const when = new Date(iso);
+      if (isNaN(when.getTime())) return iso;
+      return when.toLocaleString(undefined, {
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+      });
+    }
+
+    function renderRecords() {
+      recordCount.textContent = String(records.length);
+      recordsList.innerHTML = '';
+      if (!records.length) {
+        const box = document.createElement('div');
+        box.className = 'empty';
+        box.style.minHeight = '70px';
+        box.textContent = 'No scans saved yet — start a live scan, or save an uploaded reading.';
+        recordsList.appendChild(box);
+        return;
+      }
+      records.forEach(record => {
+        const row = document.createElement('div');
+        row.className = 'record';
+        row.dataset.id = String(record.id);
+
+        const code = document.createElement('code');
+        code.textContent = record.plate;
+
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.innerHTML = record.source + ' · ' + Math.round((record.detection_confidence || 0) * 100) +
+          '% det' + (record.ocr_confidence ? ' · ocr ' + Math.round(record.ocr_confidence * 100) + '%' : '');
+
+        const when = document.createElement('span');
+        when.className = 'when';
+        when.textContent = whenText(record.scanned_at);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = 'Delete';
+        remove.addEventListener('click', async () => {
+          remove.disabled = true;
+          try {
+            const response = await fetch('/api/records/' + record.id, { method: 'DELETE' });
+            if (!response.ok) throw new Error('Could not delete that scan.');
+            await loadRecords();
+          } catch (err) {
+            remove.disabled = false;
+            setError(err.message);
+          }
+        });
+
+        row.append(code, meta, when, remove);
+        recordsList.appendChild(row);
+      });
+    }
+
+    async function saveRecord(plate, source) {
+      const response = await fetch('/api/records', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          plate: plate.text,
+          detection_confidence: plate.confidence,
+          ocr_confidence: plate.ocr_confidence,
+          source,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save the reading.');
+      await loadRecords();
+      return data.record;
+    }
+
+    async function saveNewPlates(list) {
+      for (const plate of list) {
+        if (!plate.text || savedPlates.has(plate.text)) continue;
+        savedPlates.add(plate.text);
+        try {
+          await saveRecord(plate, 'live');
+          savedCount += 1;
+          liveStatus.textContent = liveStatus.textContent.replace(/ · \d+ saved$/, '') +
+            ' · ' + savedCount + ' saved';
+        } catch (err) {
+          liveStatus.textContent = 'Could not save: ' + err.message;
+          return;
+        }
+      }
+    }
+
+    saveResultBtn.addEventListener('click', async () => {
+      const plate = lastResult && lastResult.plates.find(item => item.text);
+      if (!plate) return;
+      saveResultBtn.disabled = true;
+      saveResultBtn.textContent = 'Saved';
+      try {
+        await saveRecord(plate, 'upload');
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setTimeout(() => {
+          saveResultBtn.textContent = 'Save this reading';
+          saveResultBtn.disabled = false;
+        }, 1200);
+      }
+    });
+
+    clearBtn.addEventListener('click', async () => {
+      if (!records.length) return;
+      if (!window.confirm('Delete all ' + records.length + ' saved scans?')) return;
+      try {
+        const response = await fetch('/api/records', { method: 'DELETE' });
+        if (!response.ok) throw new Error('Could not clear the saved scans.');
+        await loadRecords();
+        setError('');
+      } catch (err) {
+        setError(err.message);
+      }
+    });
+
+    exportBtn.addEventListener('click', () => {
+      if (!records.length) return;
+      const lines = ['plate,source,detection_confidence,ocr_confidence,scanned_at'];
+      records.forEach(record => lines.push([
+        record.plate, record.source, record.detection_confidence, record.ocr_confidence, record.scanned_at,
+      ].join(',')));
+      const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'plate-scans.csv';
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // ---- upload flow ------------------------------------------------------
 
     input.addEventListener('change', () => nameChosen(input.files[0]));
 
@@ -263,11 +468,14 @@
     });
 
     function render(data) {
+      lastResult = data;
       placeholder.hidden = true;
       liveBox.hidden = true;
       resultBox.hidden = false;
       resultImage.src = data.image;
       plateRows(plates, data.plates);
+      saveResultBtn.disabled = !data.plates.some(plate => plate.text);
+      saveResultBtn.textContent = 'Save this reading';
       timing.textContent = data.size[0] + '×' + data.size[1] + ' px · ' + data.elapsed_ms + ' ms';
     }
 
@@ -309,7 +517,10 @@
       placeholder.hidden = true;
       resultBox.hidden = true;
       liveBox.hidden = false;
-      livePlateReset();
+      savedPlates = new Set();
+      savedCount = 0;
+      livePlates.innerHTML = '';
+      liveStatus.textContent = 'Starting camera…';
       liveBtn.textContent = 'Stop live scan';
       liveBtn.classList.add('on');
       liveBtn.disabled = false;
@@ -332,11 +543,6 @@
       liveBtn.textContent = 'Start live scan';
       liveBtn.classList.remove('on');
       placeholder.hidden = false;
-    }
-
-    function livePlateReset() {
-      livePlates.innerHTML = '';
-      liveStatus.textContent = 'Starting camera…';
     }
 
     function scheduleScan(delay) {
@@ -369,7 +575,8 @@
         drawOverlay(data);
         plateRows(livePlates, data.plates);
         liveStatus.textContent = frame.width + '×' + frame.height +
-          ' frame · ' + data.elapsed_ms + ' ms · scanning continuously';
+          ' frame · ' + data.elapsed_ms + ' ms · scanning';
+        saveNewPlates(data.plates);
       } catch (err) {
         liveStatus.textContent = 'Scan error: ' + err.message;
       } finally {
@@ -402,6 +609,8 @@
     }
 
     window.addEventListener('pagehide', () => { if (stream) stopLive(); });
+
+    loadRecords();
   </script>
 </body>
 </html>
