@@ -58,11 +58,18 @@
     }
     button:hover:not(:disabled) { filter: brightness(1.15); }
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+    button.on { border-color: var(--accent); color: var(--accent); }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .thumb, .result {
       width: 100%; border-radius: 12px; border: 1px solid var(--line); background: #0a1116;
       display: block; object-fit: contain; max-height: 340px;
     }
+    .live-stage {
+      position: relative; border-radius: 12px; overflow: hidden;
+      border: 1px solid var(--line); background: #0a1116; line-height: 0;
+    }
+    .live-stage video { width: 100%; display: block; max-height: 340px; object-fit: contain; background: #05100c; }
+    .live-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
     .empty[hidden] { display: none; }
     .empty {
       display: grid; place-items: center; min-height: 220px; text-align: center;
@@ -94,7 +101,7 @@
       <span class="badge">YOLOv8 + EasyOCR</span>
       <h1>Number Plate Reader</h1>
       <p>The trained detector finds the plate in a photo, then OCR reads the characters off it.
-        Upload a picture of a vehicle, or start with the sample photo.</p>
+        Upload a picture of a vehicle, start with the sample photo, or scan live with this device's camera.</p>
     </header>
 
     <div class="grid">
@@ -109,10 +116,11 @@
           <div class="row">
             <button class="primary" id="submit" type="submit" disabled>Read plate</button>
             <button id="sample" type="button">Use sample photo</button>
+            <button id="live" type="button">Start live scan</button>
           </div>
         </form>
-        <div class="hint">Detection confidence threshold is 0.25. Photos with a clear, front-on
-          rear or front plate work best.</div>
+        <div class="hint">Live scan reads frames from this device's camera in the browser and sends
+          them to the same detector. Detection confidence threshold is 0.25.</div>
         <div class="error" id="error" hidden></div>
       </section>
 
@@ -120,6 +128,14 @@
         <h2>2 · Result</h2>
         <div class="empty" id="placeholder">Nothing analysed yet.<br />Your annotated image and the
           plate text will appear here.</div>
+        <div id="live-box" hidden>
+          <div class="live-stage">
+            <video id="live-video" autoplay muted playsinline></video>
+            <canvas id="live-overlay"></canvas>
+          </div>
+          <div id="live-plates" style="margin-top:14px"></div>
+          <div class="foot" id="live-status"></div>
+        </div>
         <div id="result-box" hidden>
           <img class="result" id="result-image" alt="Annotated result" />
           <div id="plates" style="margin-top:14px"></div>
@@ -136,12 +152,22 @@
     const dropTitle = document.getElementById('drop-title');
     const submit = document.getElementById('submit');
     const sample = document.getElementById('sample');
+    const liveBtn = document.getElementById('live');
     const errorBox = document.getElementById('error');
     const placeholder = document.getElementById('placeholder');
     const resultBox = document.getElementById('result-box');
     const resultImage = document.getElementById('result-image');
     const plates = document.getElementById('plates');
     const timing = document.getElementById('timing');
+    const liveBox = document.getElementById('live-box');
+    const liveVideo = document.getElementById('live-video');
+    const liveOverlay = document.getElementById('live-overlay');
+    const livePlates = document.getElementById('live-plates');
+    const liveStatus = document.getElementById('live-status');
+
+    let stream = null;
+    let scanning = false;
+    let timer = null;
 
     function setError(message) {
       errorBox.textContent = message || '';
@@ -153,6 +179,27 @@
       dropTitle.textContent = file.name;
       submit.disabled = false;
       setError('');
+    }
+
+    function plateRows(container, list) {
+      container.innerHTML = '';
+      if (!list.length) {
+        container.innerHTML = '<div class="empty" style="min-height:80px">No plate detected. ' +
+          'Try a closer or clearer shot.</div>';
+        return;
+      }
+      list.forEach((plate, index) => {
+        const row = document.createElement('div');
+        row.className = 'plate';
+        const code = document.createElement('code');
+        code.textContent = plate.text || `plate ${index + 1}`;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.innerHTML = 'detection ' + (plate.confidence * 100).toFixed(0) + '%<br />' +
+          (plate.text ? 'ocr ' + (plate.ocr_confidence * 100).toFixed(0) + '%' : 'no readable text');
+        row.append(code, meta);
+        container.appendChild(row);
+      });
     }
 
     input.addEventListener('change', () => nameChosen(input.files[0]));
@@ -172,6 +219,7 @@
 
     sample.addEventListener('click', async () => {
       setError('');
+      stopLive();
       sample.disabled = true;
       try {
         const response = await fetch('/static/sample_car.jpg');
@@ -193,6 +241,7 @@
       event.preventDefault();
       const file = input.files[0];
       if (!file) return;
+      stopLive();
       submit.disabled = true;
       sample.disabled = true;
       submit.innerHTML = '<span class="spin"></span>Reading…';
@@ -215,27 +264,144 @@
 
     function render(data) {
       placeholder.hidden = true;
+      liveBox.hidden = true;
       resultBox.hidden = false;
       resultImage.src = data.image;
-      plates.innerHTML = '';
-      if (!data.plates.length) {
-        plates.innerHTML = '<div class="empty" style="min-height:80px">No plate detected in this photo. ' +
-          'Try a closer or clearer shot.</div>';
-      }
-      data.plates.forEach((plate, index) => {
-        const row = document.createElement('div');
-        row.className = 'plate';
-        const code = document.createElement('code');
-        code.textContent = plate.text || `plate ${index + 1}`;
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.innerHTML = 'detection ' + (plate.confidence * 100).toFixed(0) + '%<br />' +
-          (plate.text ? 'ocr ' + (plate.ocr_confidence * 100).toFixed(0) + '%' : 'no readable text');
-        row.append(code, meta);
-        plates.appendChild(row);
-      });
+      plateRows(plates, data.plates);
       timing.textContent = data.size[0] + '×' + data.size[1] + ' px · ' + data.elapsed_ms + ' ms';
     }
+
+    // ---- live camera scan -------------------------------------------------
+    // The camera belongs to this browser, so frames are captured here and posted
+    // to /api/detect; the container itself has no camera device.
+
+    liveBtn.addEventListener('click', () => {
+      if (scanning) stopLive();
+      else startLive();
+    });
+
+    function cameraProblem(err) {
+      if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+        return 'Camera access was blocked. Allow the camera for this page (check the browser’s ' +
+          'permission prompt or open the app in its own browser tab) and try again.';
+      }
+      if (err && err.name === 'NotFoundError') {
+        return 'No camera was found on this device.';
+      }
+      return 'Could not start the camera: ' + (err && err.message ? err.message : 'unknown error');
+    }
+
+    async function startLive() {
+      setError('');
+      liveBtn.disabled = true;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1280 } },
+          audio: false,
+        });
+      } catch (err) {
+        setError(cameraProblem(err));
+        liveBtn.disabled = false;
+        return;
+      }
+      liveVideo.srcObject = stream;
+      try { await liveVideo.play(); } catch (err) { /* autoplay is muted, so this is rare */ }
+      placeholder.hidden = true;
+      resultBox.hidden = true;
+      liveBox.hidden = false;
+      livePlateReset();
+      liveBtn.textContent = 'Stop live scan';
+      liveBtn.classList.add('on');
+      liveBtn.disabled = false;
+      scanning = true;
+      scheduleScan(0);
+    }
+
+    function stopLive() {
+      if (!scanning && !stream) return;
+      scanning = false;
+      clearTimeout(timer);
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      liveVideo.srcObject = null;
+      liveBox.hidden = true;
+      livePlates.innerHTML = '';
+      liveStatus.textContent = '';
+      const ctx = liveOverlay.getContext('2d');
+      ctx.clearRect(0, 0, liveOverlay.width, liveOverlay.height);
+      liveBtn.textContent = 'Start live scan';
+      liveBtn.classList.remove('on');
+      placeholder.hidden = false;
+    }
+
+    function livePlateReset() {
+      livePlates.innerHTML = '';
+      liveStatus.textContent = 'Starting camera…';
+    }
+
+    function scheduleScan(delay) {
+      clearTimeout(timer);
+      if (!scanning) return;
+      timer = setTimeout(scanFrame, delay);
+    }
+
+    async function scanFrame() {
+      if (!scanning) return;
+      const width = liveVideo.videoWidth;
+      const height = liveVideo.videoHeight;
+      if (!width || !height) return scheduleScan(300);
+
+      const scale = Math.min(1, 960 / width);
+      const frame = document.createElement('canvas');
+      frame.width = Math.round(width * scale);
+      frame.height = Math.round(height * scale);
+      frame.getContext('2d').drawImage(liveVideo, 0, 0, frame.width, frame.height);
+      const blob = await new Promise(resolve => frame.toBlob(resolve, 'image/jpeg', 0.82));
+      if (!blob || !scanning) return scheduleScan(300);
+
+      try {
+        const body = new FormData();
+        body.append('image', blob, 'frame.jpg');
+        const response = await fetch('/api/detect', { method: 'POST', body });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Detection failed.');
+        if (!scanning) return;
+        drawOverlay(data);
+        plateRows(livePlates, data.plates);
+        liveStatus.textContent = frame.width + '×' + frame.height +
+          ' frame · ' + data.elapsed_ms + ' ms · scanning continuously';
+      } catch (err) {
+        liveStatus.textContent = 'Scan error: ' + err.message;
+      } finally {
+        scheduleScan(350);
+      }
+    }
+
+    function drawOverlay(data) {
+      liveOverlay.width = data.size[0];
+      liveOverlay.height = data.size[1];
+      const ctx = liveOverlay.getContext('2d');
+      ctx.clearRect(0, 0, liveOverlay.width, liveOverlay.height);
+      const unit = Math.max(1, data.size[0] / 640);
+      ctx.lineWidth = 2.5 * unit;
+      ctx.strokeStyle = '#00eb8c';
+      ctx.font = '600 ' + Math.round(16 * unit) + 'px ui-monospace, monospace';
+      data.plates.forEach(plate => {
+        const [x1, y1, x2, y2] = plate.box;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        if (!plate.text) return;
+        const pad = 5 * unit;
+        const boxHeight = 22 * unit;
+        const textWidth = ctx.measureText(plate.text).width;
+        const top = Math.max(0, y1 - boxHeight);
+        ctx.fillStyle = 'rgba(0, 235, 140, 0.92)';
+        ctx.fillRect(x1, top, textWidth + pad * 2, boxHeight);
+        ctx.fillStyle = '#06231a';
+        ctx.fillText(plate.text, x1 + pad, top + boxHeight - 6 * unit);
+      });
+    }
+
+    window.addEventListener('pagehide', () => { if (stream) stopLive(); });
   </script>
 </body>
 </html>

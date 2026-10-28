@@ -24,6 +24,10 @@ docker compose -f docker-compose.base44.yml up -d --build
   not import against the installed ultralytics; `webapp.py` calls the supported `YOLO` API
   instead while keeping predict.py's OCR selection rules (`read_plate_text`).
 - `number_plate.py` needs a real webcam (`cv2.VideoCapture(0)`), so it cannot run in the sandbox.
+- Live scan in the web app is **browser-side**: `getUserMedia` grabs frames in the visitor's
+  browser and posts them to `/api/detect`; the container has no camera. Automation therefore only
+  reaches the no-camera branch (`NotFoundError` → "No camera was found"). Camera access needs a
+  secure context (https) and an unblocked permission prompt.
 
 ## Verifying
 
