@@ -1,0 +1,35 @@
+services:
+  lpr:
+    build:
+      context: .
+      dockerfile: Dockerfile.base44
+    image: lpr-demo:dev
+    labels:
+      base44.project: "License Plate Recognition"
+      base44.kind: "web"
+      base44.port: "3000"
+    ports:
+      - "3000:3000"
+    # Source is bind-mounted so edits to webapp.py / templates hot-reload (flask --debug).
+    volumes:
+      - ./:/app
+      # saved scan records live outside the bind mount so they are not committed
+      - lpr-data:/data
+    working_dir: /app
+    environment:
+      - BASE44_PREVIEW_MODE
+      - MODEL_PATH=/opt/lpr/models/best.pt
+      - DB_PATH=/data/records.db
+      - PORT=3000
+      - YOLO_CONFIG_DIR=/tmp/ultralytics
+    command: ["python", "-m", "flask", "--app", "webapp", "run", "--host", "0.0.0.0", "--port", "3000", "--debug"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3000/health', timeout=5).status == 200 else 1)"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 60s
+    restart: on-failure
+
+volumes:
+  lpr-data:

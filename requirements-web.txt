@@ -1,0 +1,9 @@
+# Dependencies for the web demo that wraps predict.py (YOLO plate detection + EasyOCR).
+# torch / torchvision are installed separately from the CPU wheel index in Dockerfile.base44.
+ultralytics==8.2.103
+easyocr==1.7.1
+# best.pt was trained with an older Ultralytics release and needs omegaconf to load
+omegaconf>=2.2.0
+flask==3.0.3
+numpy<2
+Pillow>=10.0.0
